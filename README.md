@@ -102,6 +102,13 @@ Community feedback drives this addon — your suggestions help make LegacyPRD be
 
 ## Changelog
 
+### v1.0.1
+
+**Bug Fix:**
+- Fixed a bug where the addon duplicated the default Blizzard buff bar near the minimap
+- Removed all built-in buff/aura tracking to prevent conflicts with the Blizzard UI
+- The addon now focuses purely on Health, Power, Class Resources, and Cast Bar as intended
+
 ### v1.0.0
 - Initial release
 - Health and power bar with class color, green, and custom color options
