@@ -210,55 +210,6 @@ local function FullRefresh()
 end
 
 ---------------------------------------------------------------------------
--- Buff anchor frame (existing system)
----------------------------------------------------------------------------
-local function CreateAnchorFrame()
-    local anchor = CreateFrame("Frame", "LegacyPRD_Anchor", UIParent)
-    anchor:SetSize(200, 40)
-    anchor:SetPoint("CENTER", UIParent, "CENTER", 0, 200)
-    anchor:SetClampedToScreen(true)
-
-    anchor.bg = anchor:CreateTexture(nil, "BACKGROUND")
-    anchor.bg:SetAllPoints()
-    anchor.bg:SetColorTexture(0, 0, 0, 0)
-
-    -- Drag handling
-    anchor:SetMovable(true)
-    anchor:EnableMouse(true)
-    anchor:RegisterForDrag("LeftButton")
-    anchor:SetScript("OnDragStart", function(self)
-        if not ns:GetOption("locked") then
-            self:StartMoving()
-        end
-    end)
-    anchor:SetScript("OnDragStop", function(self)
-        self:StopMovingOrSizing()
-        local point, _, relPoint, x, y = self:GetPoint()
-        ns:SetOption("anchorPoint", point)
-        ns:SetOption("anchorRelPoint", relPoint)
-        ns:SetOption("anchorX", x)
-        ns:SetOption("anchorY", y)
-    end)
-
-    ns.anchor = anchor
-    return anchor
-end
-
-local function RestorePosition()
-    if not ns.anchor then return end
-
-    local point    = ns:GetOption("anchorPoint")
-    local relPoint = ns:GetOption("anchorRelPoint")
-    local x        = ns:GetOption("anchorX")
-    local y        = ns:GetOption("anchorY")
-
-    if point and relPoint and x and y then
-        ns.anchor:ClearAllPoints()
-        ns.anchor:SetPoint(point, UIParent, relPoint, x, y)
-    end
-end
-
----------------------------------------------------------------------------
 -- Event driver
 ---------------------------------------------------------------------------
 local eventFrame = CreateFrame("Frame", "LegacyPRD_EventDriver")
@@ -270,12 +221,8 @@ eventFrame:RegisterEvent("UNIT_MAXHEALTH")
 eventFrame:RegisterEvent("UNIT_POWER_FREQUENT")
 eventFrame:RegisterEvent("UNIT_MAXPOWER")
 eventFrame:RegisterEvent("UNIT_DISPLAYPOWER")
-eventFrame:RegisterEvent("UNIT_AURA")
 eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
 eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
-
-local buffElapsed = 0
-local BUFF_UPDATE_INTERVAL = 0.1
 
 local function OnEvent(self, event, arg1)
     ------------------------------------------------------------------
@@ -283,8 +230,6 @@ local function OnEvent(self, event, arg1)
     ------------------------------------------------------------------
     if event == "ADDON_LOADED" and arg1 == addonName then
         ns:InitDB()
-        CreateAnchorFrame()
-        RestorePosition()
         CreateBars()
         FullRefresh()
 
@@ -312,7 +257,6 @@ local function OnEvent(self, event, arg1)
         if LegacyPRD_UpdateClassResources then
             LegacyPRD_UpdateClassResources()
         end
-        ns:RefreshAllBuffs()
 
         -- Re-apply combat alpha (world transitions can reset state)
         if mainFrame then
@@ -351,32 +295,11 @@ local function OnEvent(self, event, arg1)
     elseif event == "PLAYER_REGEN_ENABLED" then
         if mainFrame then mainFrame:SetAlpha(ALPHA_OOC) end
 
-    ------------------------------------------------------------------
-    -- Buff tracking (throttled via OnUpdate)
-    ------------------------------------------------------------------
-    elseif event == "UNIT_AURA" then
-        if arg1 == "player" then
-            ns.pendingUpdate = true
-        end
     end
 end
 
----------------------------------------------------------------------------
--- Throttled buff refresh (no per-frame work for bars)
----------------------------------------------------------------------------
-local function OnUpdate(self, elapsed)
-    if not ns.pendingUpdate then return end
-
-    buffElapsed = buffElapsed + elapsed
-    if buffElapsed >= BUFF_UPDATE_INTERVAL then
-        buffElapsed = 0
-        ns.pendingUpdate = false
-        ns:RefreshAllBuffs()
-    end
-end
 
 eventFrame:SetScript("OnEvent", OnEvent)
-eventFrame:SetScript("OnUpdate", OnUpdate)
 
 ---------------------------------------------------------------------------
 -- Slash commands

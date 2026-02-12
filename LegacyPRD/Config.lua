@@ -1,22 +1,6 @@
 local addonName, ns = ...
 
 ---------------------------------------------------------------------------
--- Defaults for buff/aura tracking (existing LegacyPRD_DB)
----------------------------------------------------------------------------
-ns.defaults = {
-    enabled = true,
-    locked = false,
-    scale = 1.0,
-    iconSize = 32,
-    spacing = 2,
-    growDirection = "RIGHT",
-    showTimers = true,
-    showTooltips = true,
-    trackedBuffs = {},
-    playerFrameEnabled = true,
-}
-
----------------------------------------------------------------------------
 -- Defaults for PRD frame settings (LegacyPRDDB)
 ---------------------------------------------------------------------------
 local PRD_DEFAULTS = {
@@ -45,7 +29,6 @@ local PRD_DEFAULTS = {
     resourceCustomColor   = { r = 1, g = 1, b = 1 },
 }
 
-ns.DB = nil
 ns.settingsCategory = nil
 
 ---------------------------------------------------------------------------
@@ -64,16 +47,6 @@ end
 -- Database initialization
 ---------------------------------------------------------------------------
 function ns:InitDB()
-    if not LegacyPRD_DB then
-        LegacyPRD_DB = {}
-    end
-    for k, v in pairs(self.defaults) do
-        if LegacyPRD_DB[k] == nil then
-            LegacyPRD_DB[k] = v
-        end
-    end
-    self.DB = LegacyPRD_DB
-
     if not LegacyPRDDB then
         LegacyPRDDB = {}
     end
@@ -89,23 +62,7 @@ function ns:InitDB()
     end
 end
 
-function ns:GetOption(key)
-    return self.DB and self.DB[key]
-end
-
-function ns:SetOption(key, value)
-    if self.DB then
-        self.DB[key] = value
-    end
-end
-
 function ns:ResetDefaults()
-    LegacyPRD_DB = {}
-    for k, v in pairs(self.defaults) do
-        LegacyPRD_DB[k] = v
-    end
-    self.DB = LegacyPRD_DB
-
     LegacyPRDDB = {}
     for k, v in pairs(PRD_DEFAULTS) do
         LegacyPRDDB[k] = CopyDefault(v)
@@ -1033,13 +990,6 @@ function ns:HandleConfigCommand(args)
         return
     end
 
-    if args == "toggle" then
-        local enabled = not self:GetOption("enabled")
-        self:SetOption("enabled", enabled)
-        print("|cff00ccffLegacyPRD|r: " .. (enabled and "Enabled" or "Disabled") .. ".")
-        return
-    end
-
     local key, value = strsplit(" ", args, 2)
     if key == "scale" and tonumber(value) then
         local s = tonumber(value)
@@ -1050,30 +1000,10 @@ function ns:HandleConfigCommand(args)
         return
     end
 
-    if key == "iconsize" and tonumber(value) then
-        self:SetOption("iconSize", tonumber(value))
-        print("|cff00ccffLegacyPRD|r: Icon size set to " .. value .. ".")
-        if ns.ApplyLayout then ns:ApplyLayout() end
-        return
-    end
-
-    if key == "bars" then
-        local on = not self:GetOption("playerFrameEnabled")
-        self:SetOption("playerFrameEnabled", on)
-        if ns.mainFrame then
-            if on then ns.mainFrame:Show() else ns.mainFrame:Hide() end
-        end
-        print("|cff00ccffLegacyPRD|r: Player bars " .. (on and "enabled" or "disabled") .. ".")
-        return
-    end
-
     print("|cff00ccffLegacyPRD|r commands:")
     print("  /lprd - Open settings panel")
-    print("  /lprd toggle - Enable/disable addon")
     print("  /lprd lock - Lock frame position")
     print("  /lprd unlock - Unlock frame position")
     print("  /lprd scale <1-200> - Set scale percentage")
-    print("  /lprd iconsize <number> - Set icon size")
-    print("  /lprd bars - Toggle player health/power bars")
     print("  /lprd reset - Reset to defaults")
 end

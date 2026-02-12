@@ -39,10 +39,11 @@ local function OnCastEvent(self, event, unit)
     if unit and unit ~= "player" then return end
 
     if event == "UNIT_SPELLCAST_START" then
+        -- Ignore spurious cast-start that some channelled spells fire
+        if isChanneling then return end
         local name, _, _, startTimeMS, endTimeMS = UnitCastingInfo("player")
         if name then
             isCasting = true
-            isChanneling = false
             castStartTime = startTimeMS / 1000
             castEndTime = endTimeMS / 1000
             castDuration = castEndTime - castStartTime
@@ -54,7 +55,8 @@ local function OnCastEvent(self, event, unit)
             if LegacyPRD_UpdateLayout then LegacyPRD_UpdateLayout() end
         end
 
-    elseif event == "UNIT_SPELLCAST_CHANNEL_START" then
+    elseif event == "UNIT_SPELLCAST_CHANNEL_START"
+        or event == "UNIT_SPELLCAST_EMPOWER_START" then
         local name, _, _, startTimeMS, endTimeMS = UnitChannelInfo("player")
         if name then
             isChanneling = true
@@ -70,7 +72,8 @@ local function OnCastEvent(self, event, unit)
             if LegacyPRD_UpdateLayout then LegacyPRD_UpdateLayout() end
         end
 
-    elseif event == "UNIT_SPELLCAST_CHANNEL_UPDATE" then
+    elseif event == "UNIT_SPELLCAST_CHANNEL_UPDATE"
+        or event == "UNIT_SPELLCAST_EMPOWER_UPDATE" then
         local name, _, _, startTimeMS, endTimeMS = UnitChannelInfo("player")
         if name then
             castStartTime = startTimeMS / 1000
@@ -79,26 +82,38 @@ local function OnCastEvent(self, event, unit)
             castBar:SetMinMaxValues(0, castDuration)
         end
 
-    elseif event == "UNIT_SPELLCAST_STOP" or event == "UNIT_SPELLCAST_SUCCEEDED"
-        or event == "UNIT_SPELLCAST_CHANNEL_STOP" then
+    elseif event == "UNIT_SPELLCAST_CHANNEL_STOP"
+        or event == "UNIT_SPELLCAST_EMPOWER_STOP" then
+        StopCasting()
+
+    elseif event == "UNIT_SPELLCAST_STOP"
+        or event == "UNIT_SPELLCAST_SUCCEEDED" then
+        -- Ignore spurious stop/succeeded that some channelled spells fire
+        if isChanneling then return end
         StopCasting()
 
     elseif event == "UNIT_SPELLCAST_FAILED"
-        or event == "UNIT_SPELLCAST_INTERRUPTED" then
+        or event == "UNIT_SPELLCAST_INTERRUPTED"
+        or event == "UNIT_SPELLCAST_FAILED_QUIET" then
+        -- Ignore spurious failure that some channelled spells fire
+        if isChanneling then return end
         if castBar then
             castBar:SetStatusBarColor(unpack(FAILED_COLOR))
             castBar:SetValue(castDuration)
         end
-        local msg = (event == "UNIT_SPELLCAST_INTERRUPTED") and "Interrupted" or "Failed"
-        if spellText then spellText:SetText(msg) end
-        if timeText then timeText:SetText("") end
-        isCasting = false
-        isChanneling = false
-        C_Timer.After(0.3, function()
-            if not isCasting and not isChanneling then
-                StopCasting()
-            end
-        end)
+        if event == "UNIT_SPELLCAST_FAILED_QUIET" then
+            StopCasting()
+        else
+            local msg = (event == "UNIT_SPELLCAST_INTERRUPTED") and "Interrupted" or "Failed"
+            if spellText then spellText:SetText(msg) end
+            if timeText then timeText:SetText("") end
+            isCasting = false
+            C_Timer.After(0.3, function()
+                if not isCasting and not isChanneling then
+                    StopCasting()
+                end
+            end)
+        end
 
     elseif event == "PLAYER_ENTERING_WORLD" then
         StopCasting()
@@ -171,11 +186,15 @@ function LegacyPRD_InitCastBar()
     ef:RegisterEvent("UNIT_SPELLCAST_START")
     ef:RegisterEvent("UNIT_SPELLCAST_STOP")
     ef:RegisterEvent("UNIT_SPELLCAST_FAILED")
+    ef:RegisterEvent("UNIT_SPELLCAST_FAILED_QUIET")
     ef:RegisterEvent("UNIT_SPELLCAST_INTERRUPTED")
     ef:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
     ef:RegisterEvent("UNIT_SPELLCAST_CHANNEL_START")
     ef:RegisterEvent("UNIT_SPELLCAST_CHANNEL_STOP")
     ef:RegisterEvent("UNIT_SPELLCAST_CHANNEL_UPDATE")
+    ef:RegisterEvent("UNIT_SPELLCAST_EMPOWER_START")
+    ef:RegisterEvent("UNIT_SPELLCAST_EMPOWER_STOP")
+    ef:RegisterEvent("UNIT_SPELLCAST_EMPOWER_UPDATE")
     ef:RegisterEvent("PLAYER_ENTERING_WORLD")
 
     ef:SetScript("OnEvent", OnCastEvent)

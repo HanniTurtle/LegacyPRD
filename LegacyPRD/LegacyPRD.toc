@@ -2,12 +2,10 @@
 ## Title: LegacyPRD - Personal Resource Display
 ## Notes: Legacy Personal Resources
 ## Author: Twessy
-## Version: 1.0.0
-## SavedVariables: LegacyPRD_DB
+## Version: 1.0.1
 ## SavedVariablesPerCharacter: LegacyPRDDB
 
 Config.lua
-Buffs.lua
 ClassResources.lua
 CastBar.lua
 Core.lua
