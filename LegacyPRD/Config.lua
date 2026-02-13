@@ -16,6 +16,8 @@ local PRD_DEFAULTS = {
     powerCustomColor  = { r = 0, g = 0.5, b = 1 },
     showHealthBar         = true,
     showPowerBar          = true,
+    healthTextMode        = "OFF",
+    powerTextMode         = "OFF",
     showCastBar           = false,
     castBarPosition       = "bottom",
     castBarVisibility     = "casting",
@@ -54,6 +56,32 @@ function ns:InitDB()
         if LegacyPRDDB[k] == nil then
             LegacyPRDDB[k] = CopyDefault(v)
         end
+    end
+
+    -- Legacy migration: only carry forward text mode if user explicitly enabled text before
+    if LegacyPRDDB.textMode and (LegacyPRDDB.showHealthText == true or LegacyPRDDB.showPowerText == true) then
+        if LegacyPRDDB.healthTextMode == nil then
+            LegacyPRDDB.healthTextMode = LegacyPRDDB.textMode
+        end
+        if LegacyPRDDB.powerTextMode == nil then
+            LegacyPRDDB.powerTextMode = LegacyPRDDB.textMode
+        end
+    end
+
+    -- Normalize text modes to allowed values
+    local function NormalizeTextMode(v)
+        if v == "OFF" or v == "CURRENTMAX" or v == "CURRENT" then
+            return v
+        end
+        if v == "MAX" then return "CURRENT" end
+        if v == "BOTH" or v == "PERCENT" then return "CURRENTMAX" end
+        return "OFF"
+    end
+    if LegacyPRDDB.healthTextMode ~= nil then
+        LegacyPRDDB.healthTextMode = NormalizeTextMode(LegacyPRDDB.healthTextMode)
+    end
+    if LegacyPRDDB.powerTextMode ~= nil then
+        LegacyPRDDB.powerTextMode = NormalizeTextMode(LegacyPRDDB.powerTextMode)
     end
 
     -- Migrate old decimal scale (0.5-3.0) to new integer scale (1-200)
@@ -344,6 +372,11 @@ function LegacyPRD_ApplySettings()
 
     -- Rebuild layout
     LegacyPRD_UpdateLayout()
+
+    -- Status text refresh (if available)
+    if LegacyPRD_UpdateStatusText then
+        LegacyPRD_UpdateStatusText()
+    end
 end
 
 ns.ApplyPRDSettings = LegacyPRD_ApplySettings
@@ -599,6 +632,50 @@ function ns:CreateSettingsPanel()
         if LegacyPRDDB then LegacyPRDDB.showPowerBar = self:GetChecked(); LegacyPRD_ApplySettings() end
     end)
     Add(showPowerW, 24)
+
+    ---------------------------------------------------------------
+    -- Status Text
+    ---------------------------------------------------------------
+    Add(MakeHeader(content, "Status Text"), 16, {isHead = true})
+
+    local TEXT_MODE_OPTS = {
+        { text = "Off",           value = "OFF" },
+        { text = "Current / Max", value = "CURRENTMAX" },
+        { text = "Current",       value = "CURRENT" },
+    }
+    local healthTextW = MakeDropdown(content, "HealthTextMode", "Health Text")
+    UIDropDownMenu_Initialize(healthTextW.dropdown, function()
+        for _, o in ipairs(TEXT_MODE_OPTS) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text = o.text; info.value = o.value
+            info.checked = (LegacyPRDDB and (LegacyPRDDB.healthTextMode or "OFF") == o.value)
+            info.func = function(btn)
+                LegacyPRDDB.healthTextMode = btn.value
+                UIDropDownMenu_SetText(healthTextW.dropdown, btn:GetText())
+                CloseDropDownMenus()
+                if LegacyPRD_UpdateStatusText then LegacyPRD_UpdateStatusText() end
+            end
+            UIDropDownMenu_AddButton(info)
+        end
+    end)
+    Add(healthTextW, 44)
+
+    local powerTextW = MakeDropdown(content, "PowerTextMode", "Power Text")
+    UIDropDownMenu_Initialize(powerTextW.dropdown, function()
+        for _, o in ipairs(TEXT_MODE_OPTS) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text = o.text; info.value = o.value
+            info.checked = (LegacyPRDDB and (LegacyPRDDB.powerTextMode or "OFF") == o.value)
+            info.func = function(btn)
+                LegacyPRDDB.powerTextMode = btn.value
+                UIDropDownMenu_SetText(powerTextW.dropdown, btn:GetText())
+                CloseDropDownMenus()
+                if LegacyPRD_UpdateStatusText then LegacyPRD_UpdateStatusText() end
+            end
+            UIDropDownMenu_AddButton(info)
+        end
+    end)
+    Add(powerTextW, 44)
 
     ---------------------------------------------------------------
     -- Colors
@@ -896,6 +973,9 @@ function ns:CreateSettingsPanel()
 
         showHealthW.check:SetChecked(LegacyPRDDB.showHealthBar ~= false)
         showPowerW.check:SetChecked(LegacyPRDDB.showPowerBar ~= false)
+
+        SetDropdownText(healthTextW.dropdown, TEXT_MODE_OPTS, LegacyPRDDB.healthTextMode or "OFF")
+        SetDropdownText(powerTextW.dropdown, TEXT_MODE_OPTS, LegacyPRDDB.powerTextMode or "OFF")
 
         SetDropdownText(healthDDW.dropdown, HEALTH_OPTS, LegacyPRDDB.healthColorMode or "class")
         if healthPicker.swatch then

@@ -24,6 +24,81 @@ local ALPHA_COMBAT   = 1.0
 local ALPHA_OOC      = 0.6
 
 ---------------------------------------------------------------------------
+-- Text formatting
+---------------------------------------------------------------------------
+local function SafeToString(v)
+    local ok, s = pcall(tostring, v)
+    if ok and s then return s end
+    return "?"
+end
+
+local function SafeNumber(v)
+    if v == nil then return nil end
+    if type(v) ~= "number" then
+        local ok, n = pcall(tonumber, v)
+        if ok then return n end
+        return nil
+    end
+    local ok = pcall(function()
+        local _ = v + 0
+    end)
+    if ok then return v end
+    return nil
+end
+
+local function FormatShortNumber(n)
+    if n >= 1000000 then
+        local out = string.format("%.1fm", n / 1000000)
+        return out:gsub("%.0m", "m")
+    elseif n >= 1000 then
+        local out = string.format("%.1fk", n / 1000)
+        return out:gsub("%.0k", "k")
+    end
+    return tostring(n)
+end
+
+local function FormatFullNumber(n)
+    if type(BreakUpLargeNumbers) == "function" then
+        local ok, out = pcall(BreakUpLargeNumbers, n)
+        if ok and out then return out end
+    end
+    return tostring(n)
+end
+
+local function CleanNumber(v)
+    if v == nil then return nil end
+    local ok, s = pcall(tostring, v)
+    if not ok or not s then return nil end
+    local ok2, n = pcall(tonumber, s)
+    if ok2 then return n end
+    return nil
+end
+
+local function BuildStatusText(cur, max, mode)
+    if mode == "OFF" then return "" end
+
+    local curN = SafeNumber(cur)
+    local maxN = SafeNumber(max)
+    local canMath = (curN ~= nil and maxN ~= nil and maxN > 0)
+
+    local curText
+    local maxText
+    if curN ~= nil and maxN ~= nil then
+        curText = FormatShortNumber(curN)
+        maxText = FormatShortNumber(maxN)
+    else
+        curText = SafeToString(cur)
+        maxText = SafeToString(max)
+    end
+
+    if mode == "CURRENT" then
+        return curText
+    end
+
+    return curText .. "/" .. maxText
+end
+
+---------------------------------------------------------------------------
 -- Frame references (assigned in CreateBars)
 ---------------------------------------------------------------------------
 local prdAnchor   -- LegacyPRDAnchor (invisible scale-1.0 position anchor)
@@ -79,6 +154,12 @@ local function CreateBars()
     healthBar:SetMinMaxValues(0, 1)
     healthBar:SetValue(1)
 
+    healthBar.valueText = healthBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    healthBar.valueText:SetPoint("CENTER", healthBar, "CENTER", 0, 0)
+    healthBar.valueText:SetTextColor(1, 1, 1, 1)
+    healthBar.valueText:SetShadowColor(0, 0, 0, 1)
+    healthBar.valueText:SetShadowOffset(1, -1)
+
     -- Dark background visible behind the unfilled portion
     healthBar.bg = healthBar:CreateTexture(nil, "BACKGROUND")
     healthBar.bg:SetAllPoints()
@@ -114,6 +195,12 @@ local function CreateBars()
     powerBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
     powerBar:SetMinMaxValues(0, 1)
     powerBar:SetValue(1)
+
+    powerBar.valueText = powerBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    powerBar.valueText:SetPoint("CENTER", powerBar, "CENTER", 0, 0)
+    powerBar.valueText:SetTextColor(1, 1, 1, 1)
+    powerBar.valueText:SetShadowColor(0, 0, 0, 1)
+    powerBar.valueText:SetShadowOffset(1, -1)
 
     powerBar.bg = powerBar:CreateTexture(nil, "BACKGROUND")
     powerBar.bg:SetAllPoints()
@@ -176,10 +263,25 @@ end
 ---------------------------------------------------------------------------
 local function UpdateHealthBar()
     if not healthBar then return end
-    local max = UnitHealthMax("player")
-    if max > 0 then
-        healthBar:SetMinMaxValues(0, max)
-        healthBar:SetValue(UnitHealth("player"))
+    local curRaw = UnitHealth("player")
+    local maxRaw = UnitHealthMax("player")
+    local curN = CleanNumber(curRaw)
+    local maxN = CleanNumber(maxRaw)
+
+    local maxSet = maxN or maxRaw or 1
+    local curSet = curN or curRaw or 0
+
+    healthBar:SetMinMaxValues(0, maxSet)
+    healthBar:SetValue(curSet)
+    if healthBar.valueText then
+        local mode = (LegacyPRDDB and LegacyPRDDB.healthTextMode) or "OFF"
+        if mode == "OFF" then
+            healthBar.valueText:SetText("")
+        else
+            local textCur = curN or curRaw
+            local textMax = maxN or maxRaw
+            healthBar.valueText:SetText(BuildStatusText(textCur, textMax, mode))
+        end
     end
 end
 
@@ -189,14 +291,34 @@ end
 local function UpdatePowerBar()
     if not powerBar then return end
     local powerType = UnitPowerType("player")
-    local max = UnitPowerMax("player", powerType)
-    if max > 0 then
-        powerBar:SetMinMaxValues(0, max)
-        powerBar:SetValue(UnitPower("player", powerType))
-    else
-        powerBar:SetMinMaxValues(0, 1)
-        powerBar:SetValue(0)
+    local curRaw = UnitPower("player", powerType)
+    local maxRaw = UnitPowerMax("player", powerType)
+    local curN = CleanNumber(curRaw)
+    local maxN = CleanNumber(maxRaw)
+
+    local maxSet = maxN or maxRaw or 1
+    local curSet = curN or curRaw or 0
+
+    powerBar:SetMinMaxValues(0, maxSet)
+    powerBar:SetValue(curSet)
+    if powerBar.valueText then
+        local mode = (LegacyPRDDB and LegacyPRDDB.powerTextMode) or "OFF"
+        if mode == "OFF" then
+            powerBar.valueText:SetText("")
+        else
+            local textCur = curN or curRaw
+            local textMax = maxN or maxRaw
+            powerBar.valueText:SetText(BuildStatusText(textCur, textMax, mode))
+        end
     end
+end
+
+---------------------------------------------------------------------------
+-- External refresh hook for text updates
+---------------------------------------------------------------------------
+function LegacyPRD_UpdateStatusText()
+    UpdateHealthBar()
+    UpdatePowerBar()
 end
 
 ---------------------------------------------------------------------------
@@ -219,6 +341,7 @@ eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("UNIT_HEALTH")
 eventFrame:RegisterEvent("UNIT_MAXHEALTH")
 eventFrame:RegisterEvent("UNIT_POWER_FREQUENT")
+eventFrame:RegisterEvent("UNIT_POWER_UPDATE")
 eventFrame:RegisterEvent("UNIT_MAXPOWER")
 eventFrame:RegisterEvent("UNIT_DISPLAYPOWER")
 eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
@@ -247,7 +370,7 @@ local function OnEvent(self, event, arg1)
             LegacyPRD_InitCastBar()
         end
 
-        print("|cff00ccffLegacyPRD|r v1.0.0 loaded. Type |cff00ccff/lprd|r for options.")
+        print("|cff00ccffLegacyPRD|r v1.0.2 loaded. Type |cff00ccff/lprd|r for options.")
         self:UnregisterEvent("ADDON_LOADED")
 
     elseif event == "PLAYER_ENTERING_WORLD" then
@@ -274,7 +397,7 @@ local function OnEvent(self, event, arg1)
     ------------------------------------------------------------------
     -- Power events
     ------------------------------------------------------------------
-    elseif event == "UNIT_POWER_FREQUENT" or event == "UNIT_MAXPOWER" then
+    elseif event == "UNIT_POWER_FREQUENT" or event == "UNIT_POWER_UPDATE" or event == "UNIT_MAXPOWER" then
         if arg1 == "player" then
             UpdatePowerBar()
         end
