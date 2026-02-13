@@ -6,6 +6,9 @@ local addonName, ns = ...
 local BASE_ICON_HEIGHT = 12
 local RESOURCE_GAP     = 3
 local INDICATOR_GAP    = 2
+local RUNE_TEXT_UPDATE_INTERVAL = 0.05
+local EMPTY_TEXTURE    = "Interface\\Buttons\\WHITE8x8"
+local FILLED_TEXTURE   = "Interface\\TargetingFrame\\UI-StatusBar"
 
 ---------------------------------------------------------------------------
 -- Atlas helper: find the first valid atlas name from a list
@@ -119,6 +122,10 @@ local barSegments    = {}
 local currentMax     = 0
 local isVisible      = false
 local currentDKSpec  = nil
+local eventFrame
+local runeTextElapsed = 0
+local GetMax
+local UpdateBarSegments
 
 ---------------------------------------------------------------------------
 -- Helpers
@@ -143,6 +150,214 @@ local function GetActiveResourceColor()
     end
 end
 
+local function GetChargedResourceColor()
+    local c = LegacyPRDDB and LegacyPRDDB.resourceChargedColor
+    if type(c) == "table" then
+        return c.r or 0.2, c.g or 0.8, c.b or 1.0, 1
+    end
+    return 0.2, 0.8, 1.0, 1
+end
+
+local function IsComboPointResource()
+    if not classConfig then return false end
+    return not classConfig.isRunes and classConfig.powerType == Enum.PowerType.ComboPoints
+end
+
+local function GetChargedPointLookup()
+    if not IsComboPointResource() then return nil end
+    if type(GetUnitChargedPowerPoints) ~= "function" then return nil end
+
+    local points = GetUnitChargedPowerPoints("player")
+    if type(points) ~= "table" or #points == 0 then return nil end
+
+    local lookup = {}
+    for _, idx in ipairs(points) do
+        if type(idx) == "number" then
+            lookup[idx] = true
+        end
+    end
+    return lookup
+end
+
+local function GetResourceFillTexture()
+    if type(LegacyPRD_GetStatusBarTexturePath) == "function" then
+        return LegacyPRD_GetStatusBarTexturePath()
+    end
+    return FILLED_TEXTURE
+end
+
+local function ShouldShowResourceBorders()
+    return LegacyPRDDB and LegacyPRDDB.resourceBorders == true
+end
+
+local function ShouldShowRuneRechargeTracker()
+    return LegacyPRDDB == nil or LegacyPRDDB.showResourceRechargeTimer ~= false
+end
+
+local function ApplyResourceBorder(frame)
+    if not frame then return end
+    if not ShouldShowResourceBorders() then
+        frame:SetBackdrop(nil)
+        return
+    end
+
+    local edgeFile = type(LegacyPRD_GetBorderTexturePath) == "function" and LegacyPRD_GetBorderTexturePath() or nil
+    local edgeSize = type(LegacyPRD_GetBorderSize) == "function" and LegacyPRD_GetBorderSize() or 1
+    if not edgeFile or edgeSize <= 0 then
+        frame:SetBackdrop(nil)
+        return
+    end
+
+    frame:SetBackdrop({
+        edgeFile = edgeFile,
+        edgeSize = edgeSize,
+        insets   = { left = 0, right = 0, top = 0, bottom = 0 },
+    })
+    local r, g, b, a = 0, 0, 0, 1
+    if type(LegacyPRD_GetBorderColor) == "function" then
+        r, g, b, a = LegacyPRD_GetBorderColor()
+    end
+    frame:SetBackdropBorderColor(r, g, b, a or 1)
+end
+
+local function FormatRemainingSeconds(sec)
+    if not sec or sec <= 0 then return "" end
+    if sec < 10 then
+        return string.format("%.1f", sec)
+    end
+    return tostring(math.ceil(sec))
+end
+
+local function NormalizeCooldownValues(startTime, duration, now)
+    if not startTime or not duration then
+        return startTime, duration
+    end
+
+    -- Some clients/addons can expose cooldown values in milliseconds.
+    if duration > 100 then
+        duration = duration / 1000
+    end
+    if now and startTime > (now * 10) then
+        startTime = startTime / 1000
+    end
+
+    return startTime, duration
+end
+
+local function ClearIndicatorCooldown(ind)
+    if not ind then return end
+    if ind.cooldown then
+        if ind.cooldown.Clear then
+            ind.cooldown:Clear()
+        else
+            ind.cooldown:SetCooldown(0, 0)
+        end
+        ind.cooldown:Hide()
+    end
+    if ind.cooldownText then
+        ind.cooldownText:SetText("")
+    end
+end
+
+local function UpdateRuneIndicatorCooldown(ind, runeIndex, now)
+    if not ind then return false end
+    if not ShouldShowRuneRechargeTracker() then
+        ClearIndicatorCooldown(ind)
+        return false
+    end
+    local startTime, duration, runeReady = GetRuneCooldown(runeIndex)
+    startTime, duration = NormalizeCooldownValues(startTime, duration, now)
+    if runeReady or not startTime or not duration or duration <= 0 then
+        ClearIndicatorCooldown(ind)
+        return false
+    end
+
+    local remaining = (startTime + duration) - now
+    if remaining <= 0 then
+        ClearIndicatorCooldown(ind)
+        return false
+    end
+
+    if ind.cooldown then
+        -- Cooldown swipes look square over round rune atlases; keep text-only tracker for icons.
+        ind.cooldown:Hide()
+    end
+    if ind.cooldownText then
+        ind.cooldownText:SetText(FormatRemainingSeconds(remaining))
+    end
+    return true
+end
+
+local function GetRuneIndexForDisplay(displayIndex, maxRunes)
+    if not classConfig or not classConfig.isRunes then
+        return displayIndex
+    end
+
+    local max = maxRunes or 6
+    return (max - displayIndex + 1)
+end
+
+local function UpdateRuneCooldownVisuals()
+    if not classConfig or not classConfig.isRunes then
+        return false
+    end
+
+    if not ShouldShowRuneRechargeTracker() then
+        for i = 1, #indicators do
+            ClearIndicatorCooldown(indicators[i])
+        end
+        return false
+    end
+
+    if GetResourceStyle() == "bar" or not isVisible then
+        for i = 1, #indicators do
+            ClearIndicatorCooldown(indicators[i])
+        end
+        return false
+    end
+
+    local max = math.min(GetMax(), #indicators)
+    local now = GetTime()
+    local anyPending = false
+    for i = 1, max do
+        local runeIndex = GetRuneIndexForDisplay(i, max)
+        if UpdateRuneIndicatorCooldown(indicators[i], runeIndex, now) then
+            anyPending = true
+        end
+    end
+    for i = max + 1, #indicators do
+        ClearIndicatorCooldown(indicators[i])
+    end
+    return anyPending
+end
+
+local function StopRuneTextUpdates()
+    runeTextElapsed = 0
+    if eventFrame then
+        eventFrame:SetScript("OnUpdate", nil)
+    end
+end
+
+local function StartRuneTextUpdates()
+    if not eventFrame then return end
+    eventFrame:SetScript("OnUpdate", function(self, elapsed)
+        runeTextElapsed = runeTextElapsed + elapsed
+        if runeTextElapsed < RUNE_TEXT_UPDATE_INTERVAL then return end
+        runeTextElapsed = 0
+
+        local pending
+        if GetResourceStyle() == "bar" then
+            pending = UpdateBarSegments and UpdateBarSegments() or false
+        else
+            pending = UpdateRuneCooldownVisuals()
+        end
+
+        if not pending then
+            self:SetScript("OnUpdate", nil)
+        end
+    end)
+end
+
 local function ShouldShowResources()
     if not classConfig then return false end
     if not LegacyPRDDB or not LegacyPRDDB.showClassResources then return false end
@@ -158,7 +373,7 @@ local function ShouldShowResources()
     return true
 end
 
-local function GetMax()
+GetMax = function()
     if classConfig.isRunes then return 6 end
     local pt  = classConfig.powerType
     local max = UnitPowerMax("player", pt)
@@ -209,14 +424,22 @@ end
 ---------------------------------------------------------------------------
 -- Set an indicator to filled or empty state (Blizzard / Squares)
 ---------------------------------------------------------------------------
-local function SetIndicatorFilled(ind)
+local function SetIndicatorFilled(ind, isCharged)
     local style = GetResourceStyle()
+    local r, g, b, a = GetActiveResourceColor()
+    if isCharged then
+        r, g, b, a = GetChargedResourceColor()
+    end
+
     if style ~= "squares" and ind.filledAtlas then
         ind.texture:SetAtlas(ind.filledAtlas, false)
-        ind.texture:SetVertexColor(1, 1, 1, 1)
+        if isCharged then
+            ind.texture:SetVertexColor(r, g, b, a)
+        else
+            ind.texture:SetVertexColor(1, 1, 1, 1)
+        end
     else
-        ind.texture:SetTexture("Interface\\Buttons\\WHITE8x8")
-        local r, g, b, a = GetActiveResourceColor()
+        ind.texture:SetTexture(GetResourceFillTexture())
         ind.texture:SetVertexColor(r, g, b, a)
     end
     ind.texture:SetDesaturated(false)
@@ -224,21 +447,37 @@ local function SetIndicatorFilled(ind)
     ind:Show()
 end
 
-local function SetIndicatorEmpty(ind)
+local function SetIndicatorEmpty(ind, isCharged)
     local style = GetResourceStyle()
+    local chargedR, chargedG, chargedB = GetChargedResourceColor()
     if style ~= "squares" and ind.emptyAtlas then
         ind.texture:SetAtlas(ind.emptyAtlas, false)
-        ind.texture:SetVertexColor(1, 1, 1, 1)
+        if isCharged then
+            ind.texture:SetVertexColor(chargedR, chargedG, chargedB, 0.65)
+        else
+            ind.texture:SetVertexColor(1, 1, 1, 1)
+        end
         ind.texture:SetDesaturated(false)
         ind.texture:SetAlpha(1.0)
     elseif style ~= "squares" and ind.filledAtlas then
         ind.texture:SetAtlas(ind.filledAtlas, false)
-        ind.texture:SetVertexColor(1, 1, 1, 1)
-        ind.texture:SetDesaturated(true)
-        ind.texture:SetAlpha(0.35)
+        if isCharged then
+            ind.texture:SetVertexColor(chargedR, chargedG, chargedB, 0.65)
+            ind.texture:SetDesaturated(false)
+            ind.texture:SetAlpha(0.35)
+        else
+            ind.texture:SetVertexColor(1, 1, 1, 1)
+            ind.texture:SetDesaturated(true)
+            ind.texture:SetAlpha(0.35)
+        end
     else
-        ind.texture:SetTexture("Interface\\Buttons\\WHITE8x8")
-        ind.texture:SetVertexColor(0.15, 0.15, 0.15, 0.8)
+        if isCharged then
+            ind.texture:SetTexture(GetResourceFillTexture())
+            ind.texture:SetVertexColor(chargedR * 0.45, chargedG * 0.45, chargedB * 0.45, 0.85)
+        else
+            ind.texture:SetTexture(EMPTY_TEXTURE)
+            ind.texture:SetVertexColor(0.15, 0.15, 0.15, 0.8)
+        end
         ind.texture:SetDesaturated(false)
         ind.texture:SetAlpha(1.0)
     end
@@ -246,14 +485,35 @@ local function SetIndicatorEmpty(ind)
 end
 
 ---------------------------------------------------------------------------
--- Indicator creation — plain Frame, single texture, NO backdrop/border
+-- Indicator creation
 ---------------------------------------------------------------------------
 local function CreateIndicator(parent)
-    local f = CreateFrame("Frame", nil, parent)  -- NO template
+    local f = CreateFrame("Frame", nil, parent, "BackdropTemplate")
     f.texture = f:CreateTexture(nil, "ARTWORK")
     f.texture:SetAllPoints()
 
+    f.cooldown = CreateFrame("Cooldown", nil, f, "CooldownFrameTemplate")
+    f.cooldown:SetAllPoints()
+    if f.cooldown.SetDrawBling then f.cooldown:SetDrawBling(false) end
+    if f.cooldown.SetDrawEdge then f.cooldown:SetDrawEdge(false) end
+    if f.cooldown.SetHideCountdownNumbers then f.cooldown:SetHideCountdownNumbers(true) end
+    if f.cooldown.SetReverse then f.cooldown:SetReverse(true) end
+    if f.cooldown.SetSwipeColor then f.cooldown:SetSwipeColor(0, 0, 0, 0.75) end
+    f.cooldown:Hide()
+
+    f.cooldownText = f:CreateFontString(nil, "OVERLAY")
+    f.cooldownText:SetPoint("CENTER", f.texture, "CENTER", 0, 1)
+    f.cooldownText:SetFont("Fonts\\FRIZQT__.TTF", 9, "OUTLINE")
+    f.cooldownText:SetJustifyH("CENTER")
+    f.cooldownText:SetJustifyV("MIDDLE")
+    f.cooldownText:SetTextColor(1, 1, 1, 1)
+    f.cooldownText:SetShadowColor(0, 0, 0, 1)
+    f.cooldownText:SetShadowOffset(1, -1)
+    f.cooldownText:SetText("")
+
     ResolveIndicatorAtlases(f)
+    ApplyResourceBorder(f)
+    ClearIndicatorCooldown(f)
     SetIndicatorEmpty(f)  -- start empty
     return f
 end
@@ -316,6 +576,13 @@ function LegacyPRD_UpdateClassResourceLayout(barWidth, position)
         local ind = indicators[i]
         ind:ClearAllPoints()
         ind:SetSize(iconW, iconH)
+        if ind.cooldownText then
+            local fs = math.max(6, math.floor(math.min(iconH, iconW) * 0.55))
+            ind.cooldownText:SetFont("Fonts\\FRIZQT__.TTF", fs, "OUTLINE")
+            ind.cooldownText:SetWidth(math.max(iconW + 8, 18))
+            if ind.cooldownText.SetWordWrap then ind.cooldownText:SetWordWrap(false) end
+        end
+        ApplyResourceBorder(ind)
         if i == 1 then
             ind:SetPoint("TOPLEFT", resourceRow, "TOPLEFT", xOffset, 0)
         else
@@ -351,9 +618,26 @@ function LegacyPRD_UpdateBarResourceLayout()
     local segW = availW / max
 
     while #barSegments < max do
-        local seg = CreateFrame("Frame", nil, resourceBarFrame)
+        local seg = CreateFrame("Frame", nil, resourceBarFrame, "BackdropTemplate")
+        seg.bg = seg:CreateTexture(nil, "BACKGROUND")
+        seg.bg:SetAllPoints()
+        seg.bg:SetTexture(EMPTY_TEXTURE)
+        seg.bg:SetVertexColor(0.15, 0.15, 0.15, 0.8)
+
         seg.texture = seg:CreateTexture(nil, "ARTWORK")
-        seg.texture:SetAllPoints()
+        seg.texture:SetPoint("TOPLEFT", seg, "TOPLEFT", 0, 0)
+        seg.texture:SetPoint("BOTTOMLEFT", seg, "BOTTOMLEFT", 0, 0)
+        seg.texture:SetWidth(0)
+
+        seg.timerText = seg:CreateFontString(nil, "OVERLAY")
+        seg.timerText:SetPoint("CENTER", seg, "CENTER", 0, 0)
+        seg.timerText:SetFont("Fonts\\FRIZQT__.TTF", 8, "OUTLINE")
+        seg.timerText:SetTextColor(1, 1, 1, 1)
+        seg.timerText:SetShadowColor(0, 0, 0, 1)
+        seg.timerText:SetShadowOffset(1, -1)
+        seg.timerText:SetText("")
+
+        ApplyResourceBorder(seg)
         barSegments[#barSegments + 1] = seg
     end
 
@@ -361,6 +645,13 @@ function LegacyPRD_UpdateBarResourceLayout()
         local seg = barSegments[i]
         seg:ClearAllPoints()
         seg:SetSize(segW, h)
+        ApplyResourceBorder(seg)
+        if seg.timerText then
+            local fs = math.max(6, math.floor(math.min(h, segW) * 0.55))
+            seg.timerText:SetFont("Fonts\\FRIZQT__.TTF", fs, "OUTLINE")
+            seg.timerText:SetWidth(segW)
+            if seg.timerText.SetWordWrap then seg.timerText:SetWordWrap(false) end
+        end
         local xOff = (i - 1) * (segW + divW)
         seg:SetPoint("TOPLEFT", resourceBarFrame, "TOPLEFT", xOff, 0)
         seg:Show()
@@ -373,37 +664,111 @@ function LegacyPRD_UpdateBarResourceLayout()
     currentMax = max
 end
 
+local function SetBarSegmentFill(seg, progress, texturePath, r, g, b, a)
+    if not seg or not seg.texture then return end
+    if seg.bg then
+        seg.bg:SetTexture(EMPTY_TEXTURE)
+        seg.bg:SetVertexColor(0.15, 0.15, 0.15, 0.8)
+    end
+
+    if progress <= 0 then
+        seg.texture:Hide()
+        return
+    end
+
+    if progress > 1 then progress = 1 end
+    seg.texture:Show()
+    seg.texture:SetTexture(texturePath)
+    seg.texture:SetVertexColor(r, g, b, a)
+    seg.texture:ClearAllPoints()
+    seg.texture:SetPoint("TOPLEFT", seg, "TOPLEFT", 0, 0)
+    seg.texture:SetPoint("BOTTOMLEFT", seg, "BOTTOMLEFT", 0, 0)
+
+    local w = seg:GetWidth() * progress
+    if w < 2 then w = 2 end
+    seg.texture:SetWidth(w)
+end
+
+local function SetBarSegmentTimerText(seg, text)
+    if seg and seg.timerText then
+        seg.timerText:SetText(text or "")
+    end
+end
+
 ---------------------------------------------------------------------------
 -- Update bar segment fill states
 ---------------------------------------------------------------------------
-local function UpdateBarSegments()
-    if not resourceBarFrame or not resourceBarFrame:IsShown() then return end
+UpdateBarSegments = function()
+    if not resourceBarFrame or not resourceBarFrame:IsShown() then return false end
     local max = GetMax()
     local r, g, b, a = GetActiveResourceColor()
+    local chargedR, chargedG, chargedB, chargedA = GetChargedResourceColor()
+    local fillTexture = GetResourceFillTexture()
 
     if classConfig.isRunes then
+        local showTracker = ShouldShowRuneRechargeTracker()
+        local now = GetTime()
+        local anyPending = false
         for i = 1, math.min(max, #barSegments) do
-            local _, _, runeReady = GetRuneCooldown(i)
+            local seg = barSegments[i]
+            local runeIndex = GetRuneIndexForDisplay(i, max)
+            local startTime, duration, runeReady = GetRuneCooldown(runeIndex)
+            startTime, duration = NormalizeCooldownValues(startTime, duration, now)
             if runeReady then
-                barSegments[i].texture:SetTexture("Interface\\TargetingFrame\\UI-StatusBar")
-                barSegments[i].texture:SetVertexColor(r, g, b, a)
+                SetBarSegmentFill(seg, 1, fillTexture, r, g, b, a)
+                SetBarSegmentTimerText(seg, "")
             else
-                barSegments[i].texture:SetTexture("Interface\\Buttons\\WHITE8x8")
-                barSegments[i].texture:SetVertexColor(0.15, 0.15, 0.15, 0.8)
+                if showTracker and startTime and duration and duration > 0 then
+                    local progress = (now - startTime) / duration
+                    if progress < 0 then progress = 0 end
+                    if progress > 1 then progress = 1 end
+
+                    SetBarSegmentFill(seg, progress, fillTexture, r, g, b, a)
+
+                    local remaining = (startTime + duration) - now
+                    if remaining > 0 then
+                        anyPending = true
+                        SetBarSegmentTimerText(seg, FormatRemainingSeconds(remaining))
+                    else
+                        SetBarSegmentTimerText(seg, "")
+                    end
+                else
+                    SetBarSegmentFill(seg, 0, fillTexture, r, g, b, a)
+                    SetBarSegmentTimerText(seg, "")
+                end
             end
         end
+        for i = max + 1, #barSegments do
+            SetBarSegmentFill(barSegments[i], 0, fillTexture, r, g, b, a)
+            SetBarSegmentTimerText(barSegments[i], "")
+        end
+        return showTracker and anyPending
     else
         local cur = GetCurrent()
+        local chargedLookup = GetChargedPointLookup()
         for i = 1, math.min(max, #barSegments) do
+            local seg = barSegments[i]
             if i <= cur then
-                barSegments[i].texture:SetTexture("Interface\\TargetingFrame\\UI-StatusBar")
-                barSegments[i].texture:SetVertexColor(r, g, b, a)
+                if chargedLookup and chargedLookup[i] then
+                    SetBarSegmentFill(seg, 1, fillTexture, chargedR, chargedG, chargedB, chargedA)
+                else
+                    SetBarSegmentFill(seg, 1, fillTexture, r, g, b, a)
+                end
             else
-                barSegments[i].texture:SetTexture("Interface\\Buttons\\WHITE8x8")
-                barSegments[i].texture:SetVertexColor(0.15, 0.15, 0.15, 0.8)
+                if chargedLookup and chargedLookup[i] then
+                    SetBarSegmentFill(seg, 1, fillTexture, chargedR * 0.45, chargedG * 0.45, chargedB * 0.45, 0.85)
+                else
+                    SetBarSegmentFill(seg, 0, fillTexture, r, g, b, a)
+                end
             end
+            SetBarSegmentTimerText(seg, "")
+        end
+        for i = max + 1, #barSegments do
+            SetBarSegmentFill(barSegments[i], 0, fillTexture, r, g, b, a)
+            SetBarSegmentTimerText(barSegments[i], "")
         end
     end
+    return false
 end
 
 ---------------------------------------------------------------------------
@@ -418,10 +783,26 @@ function LegacyPRD_UpdateClassResources()
         if LegacyPRD_ApplySettings then
             LegacyPRD_ApplySettings()
         end
-        if not isVisible then return end
+        if not isVisible then
+            if classConfig.isRunes then
+                StopRuneTextUpdates()
+                for i = 1, #indicators do
+                    ClearIndicatorCooldown(indicators[i])
+                end
+            end
+            return
+        end
     end
 
-    if not isVisible then return end
+    if not isVisible then
+        if classConfig.isRunes then
+            StopRuneTextUpdates()
+            for i = 1, #indicators do
+                ClearIndicatorCooldown(indicators[i])
+            end
+        end
+        return
+    end
 
     local max = GetMax()
 
@@ -434,27 +815,49 @@ function LegacyPRD_UpdateClassResources()
     local style = GetResourceStyle()
 
     if style == "bar" then
-        UpdateBarSegments()
+        local pending = UpdateBarSegments()
+        if classConfig.isRunes then
+            if pending then
+                StartRuneTextUpdates()
+            else
+                StopRuneTextUpdates()
+            end
+            for i = 1, #indicators do
+                ClearIndicatorCooldown(indicators[i])
+            end
+        end
     else
         -- Blizzard / Squares: update floating indicators
         if not resourceRow then return end
         if classConfig.isRunes then
             for i = 1, math.min(max, #indicators) do
-                local _, _, runeReady = GetRuneCooldown(i)
+                local runeIndex = GetRuneIndexForDisplay(i, max)
+                local _, _, runeReady = GetRuneCooldown(runeIndex)
                 if runeReady then
                     SetIndicatorFilled(indicators[i])
                 else
                     SetIndicatorEmpty(indicators[i])
                 end
             end
+            if UpdateRuneCooldownVisuals() then
+                StartRuneTextUpdates()
+            else
+                StopRuneTextUpdates()
+            end
         else
+            StopRuneTextUpdates()
             local cur = GetCurrent()
+            local chargedLookup = GetChargedPointLookup()
             for i = 1, math.min(max, #indicators) do
+                local isCharged = chargedLookup and chargedLookup[i]
                 if i <= cur then
-                    SetIndicatorFilled(indicators[i])
+                    SetIndicatorFilled(indicators[i], isCharged)
                 else
-                    SetIndicatorEmpty(indicators[i])
+                    SetIndicatorEmpty(indicators[i], isCharged)
                 end
+            end
+            for i = 1, #indicators do
+                ClearIndicatorCooldown(indicators[i])
             end
         end
     end
@@ -487,26 +890,29 @@ function LegacyPRD_InitClassResources()
     resourceBarFrame:Hide()
     ns.classResourceBar = resourceBarFrame
 
-    local ef = CreateFrame("Frame")
+    eventFrame = CreateFrame("Frame")
 
-    ef:RegisterEvent("PLAYER_ENTERING_WORLD")
-    ef:RegisterEvent("UNIT_POWER_FREQUENT")
-    ef:RegisterEvent("UNIT_MAXPOWER")
+    eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    eventFrame:RegisterEvent("UNIT_POWER_FREQUENT")
+    eventFrame:RegisterEvent("UNIT_MAXPOWER")
+    if IsComboPointResource() then
+        eventFrame:RegisterEvent("UNIT_POWER_POINT_CHARGE")
+    end
 
     if classConfig.requiresSpec then
-        ef:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+        eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
     end
     if classConfig.requiresForm then
-        ef:RegisterEvent("UPDATE_SHAPESHIFT_FORM")
+        eventFrame:RegisterEvent("UPDATE_SHAPESHIFT_FORM")
     end
     if classConfig.isRunes then
-        ef:RegisterEvent("RUNE_POWER_UPDATE")
-        ef:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+        eventFrame:RegisterEvent("RUNE_POWER_UPDATE")
+        eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
         currentDKSpec = GetSpecialization()
     end
 
-    ef:SetScript("OnEvent", function(self, event, arg1)
-        if event == "UNIT_POWER_FREQUENT" or event == "UNIT_MAXPOWER" then
+    eventFrame:SetScript("OnEvent", function(self, event, arg1)
+        if event == "UNIT_POWER_FREQUENT" or event == "UNIT_MAXPOWER" or event == "UNIT_POWER_POINT_CHARGE" then
             if arg1 ~= "player" then return end
         end
 

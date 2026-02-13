@@ -20,8 +20,9 @@ local HEALTH_HEIGHT  = 10
 local POWER_HEIGHT   = 8
 local SEP_HEIGHT     = 2
 
-local ALPHA_COMBAT   = 1.0
-local ALPHA_OOC      = 0.6
+local DEFAULT_STATUSBAR_TEXTURE = "Interface\\TargetingFrame\\UI-StatusBar"
+local DEFAULT_BORDER_TEXTURE    = "Interface\\Buttons\\WHITE8X8"
+local DEFAULT_BORDER_SIZE       = 1
 
 ---------------------------------------------------------------------------
 -- Text formatting
@@ -109,14 +110,104 @@ local powerBar    -- LegacyPRDPowerBar
 local castSep     -- black divider between power and cast bar
 local castBar     -- LegacyPRDCastBar
 
----------------------------------------------------------------------------
--- Shared backdrop definition: 1px solid black border, no fill
----------------------------------------------------------------------------
-local BORDER_BACKDROP = {
-    edgeFile = "Interface\\Buttons\\WHITE8X8",
-    edgeSize = 1,
-    insets   = { left = 0, right = 0, top = 0, bottom = 0 },
-}
+local function ClampPercent(v, fallback)
+    local n = tonumber(v)
+    if not n then n = fallback or 100 end
+    if n < 0 then n = 0 end
+    if n > 100 then n = 100 end
+    return n
+end
+
+function LegacyPRD_GetSharedMediaLib()
+    if type(LibStub) ~= "function" then return nil end
+    local ok, lib = pcall(LibStub, "LibSharedMedia-3.0", true)
+    if ok then return lib end
+    return nil
+end
+
+function LegacyPRD_GetStatusBarTexturePath()
+    local key = (LegacyPRDDB and LegacyPRDDB.barTexture) or "Blizzard"
+    local lsm = LegacyPRD_GetSharedMediaLib()
+    if lsm and lsm.Fetch then
+        local path = lsm:Fetch("statusbar", key, true)
+        if type(path) == "string" and path ~= "" then
+            return path
+        end
+    end
+    if key == "Solid" then
+        return "Interface\\Buttons\\WHITE8X8"
+    end
+    return DEFAULT_STATUSBAR_TEXTURE
+end
+
+function LegacyPRD_GetBorderTexturePath()
+    local key = (LegacyPRDDB and LegacyPRDDB.borderTexture) or "Solid"
+    if key == "None" then return nil end
+    local lsm = LegacyPRD_GetSharedMediaLib()
+    if lsm and lsm.Fetch then
+        local path = lsm:Fetch("border", key, true)
+        if type(path) == "string" and path ~= "" then
+            return path
+        end
+    end
+    return DEFAULT_BORDER_TEXTURE
+end
+
+function LegacyPRD_GetBorderSize()
+    local v = tonumber(LegacyPRDDB and LegacyPRDDB.borderSize) or DEFAULT_BORDER_SIZE
+    if v < 0 then v = 0 end
+    if v > 32 then v = 32 end
+    return v
+end
+
+function LegacyPRD_GetBorderColor()
+    local c = LegacyPRDDB and LegacyPRDDB.borderColor
+    if type(c) == "table" then
+        return c.r or 0, c.g or 0, c.b or 0, 1
+    end
+    return 0, 0, 0, 1
+end
+
+local function ApplyMainFrameBorder()
+    if not mainFrame then return end
+    local edgeFile = LegacyPRD_GetBorderTexturePath()
+    local edgeSize = LegacyPRD_GetBorderSize()
+    if edgeFile and edgeSize > 0 then
+        mainFrame:SetBackdrop({
+            edgeFile = edgeFile,
+            edgeSize = edgeSize,
+            insets   = { left = 0, right = 0, top = 0, bottom = 0 },
+        })
+        local r, g, b, a = LegacyPRD_GetBorderColor()
+        mainFrame:SetBackdropBorderColor(r, g, b, a or 1)
+    else
+        mainFrame:SetBackdrop(nil)
+    end
+end
+
+function LegacyPRD_ApplyVisuals()
+    local tex = LegacyPRD_GetStatusBarTexturePath()
+    if healthBar then healthBar:SetStatusBarTexture(tex) end
+    if powerBar  then powerBar:SetStatusBarTexture(tex) end
+    if castBar   then castBar:SetStatusBarTexture(tex) end
+    ApplyMainFrameBorder()
+end
+
+function LegacyPRD_GetConfiguredAlpha(inCombat)
+    local db = LegacyPRDDB
+    local pct
+    if inCombat then
+        pct = ClampPercent(db and db.alphaInCombat, 100)
+    else
+        pct = ClampPercent(db and db.alphaOutOfCombat, 60)
+    end
+    return pct / 100
+end
+
+function LegacyPRD_ApplyFrameAlpha()
+    if not mainFrame then return end
+    mainFrame:SetAlpha(LegacyPRD_GetConfiguredAlpha(InCombatLockdown()))
+end
 
 ---------------------------------------------------------------------------
 -- Bar creation
@@ -139,10 +230,8 @@ local function CreateBars()
     mainFrame:SetFrameStrata("MEDIUM")
     mainFrame:SetFrameLevel(10)
     mainFrame:SetClampedToScreen(true)
-
-    -- 1px black outline border wrapping all child elements
-    mainFrame:SetBackdrop(BORDER_BACKDROP)
-    mainFrame:SetBackdropBorderColor(0, 0, 0, 1)
+    ApplyMainFrameBorder()
+    local statusTex = LegacyPRD_GetStatusBarTexturePath()
 
     -----------------------------------------------------------------------
     -- 2) Health bar
@@ -150,7 +239,7 @@ local function CreateBars()
     healthBar = CreateFrame("StatusBar", "LegacyPRDHealthBar", mainFrame)
     healthBar:SetSize(BAR_WIDTH, HEALTH_HEIGHT)
     healthBar:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 1, -1)
-    healthBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+    healthBar:SetStatusBarTexture(statusTex)
     healthBar:SetMinMaxValues(0, 1)
     healthBar:SetValue(1)
 
@@ -192,7 +281,7 @@ local function CreateBars()
     powerBar = CreateFrame("StatusBar", "LegacyPRDPowerBar", mainFrame)
     powerBar:SetSize(BAR_WIDTH, POWER_HEIGHT)
     powerBar:SetPoint("TOP", separator, "BOTTOM", 0, 0)
-    powerBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+    powerBar:SetStatusBarTexture(statusTex)
     powerBar:SetMinMaxValues(0, 1)
     powerBar:SetValue(1)
 
@@ -220,7 +309,7 @@ local function CreateBars()
     -- 6) Cast bar (inside main frame, shown during casts)
     -----------------------------------------------------------------------
     castBar = CreateFrame("StatusBar", "LegacyPRDCastBar", mainFrame)
-    castBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+    castBar:SetStatusBarTexture(statusTex)
     castBar:SetMinMaxValues(0, 1)
     castBar:SetValue(0)
     castBar:SetStatusBarColor(1.0, 0.7, 0.0)
@@ -243,7 +332,7 @@ local function CreateBars()
     -----------------------------------------------------------------------
     -- Initial alpha based on current combat state
     -----------------------------------------------------------------------
-    mainFrame:SetAlpha(InCombatLockdown() and ALPHA_COMBAT or ALPHA_OOC)
+    LegacyPRD_ApplyFrameAlpha()
 
     -- Expose on namespace for Config / other modules
     ns.prdAnchor  = prdAnchor
@@ -370,7 +459,7 @@ local function OnEvent(self, event, arg1)
             LegacyPRD_InitCastBar()
         end
 
-        print("|cff00ccffLegacyPRD|r v1.0.2 loaded. Type |cff00ccff/lprd|r for options.")
+        print("|cff00ccffLegacyPRD|r v1.0.3 loaded. Type |cff00ccff/lprd|r for options.")
         self:UnregisterEvent("ADDON_LOADED")
 
     elseif event == "PLAYER_ENTERING_WORLD" then
@@ -382,9 +471,7 @@ local function OnEvent(self, event, arg1)
         end
 
         -- Re-apply combat alpha (world transitions can reset state)
-        if mainFrame then
-            mainFrame:SetAlpha(InCombatLockdown() and ALPHA_COMBAT or ALPHA_OOC)
-        end
+        LegacyPRD_ApplyFrameAlpha()
 
     ------------------------------------------------------------------
     -- Health events
@@ -413,10 +500,10 @@ local function OnEvent(self, event, arg1)
     -- Combat alpha fade
     ------------------------------------------------------------------
     elseif event == "PLAYER_REGEN_DISABLED" then
-        if mainFrame then mainFrame:SetAlpha(ALPHA_COMBAT) end
+        LegacyPRD_ApplyFrameAlpha()
 
     elseif event == "PLAYER_REGEN_ENABLED" then
-        if mainFrame then mainFrame:SetAlpha(ALPHA_OOC) end
+        LegacyPRD_ApplyFrameAlpha()
 
     end
 end

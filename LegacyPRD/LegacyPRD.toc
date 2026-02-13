@@ -2,7 +2,8 @@
 ## Title: LegacyPRD - Personal Resource Display
 ## Notes: Legacy Personal Resources
 ## Author: Twessy
-## Version: 1.0.2
+## Version: 1.0.3
+## OptionalDeps: LibSharedMedia-3.0
 ## SavedVariablesPerCharacter: LegacyPRDDB
 
 Config.lua

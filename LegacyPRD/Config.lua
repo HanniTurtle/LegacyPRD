@@ -9,13 +9,21 @@ local PRD_DEFAULTS = {
     scale  = 100,
     width  = 100,
     height = 100,
+    alphaInCombat    = 100,
+    alphaOutOfCombat = 60,
     locked = true,
+    barTexture       = "Blizzard",
+    borderTexture    = "Solid",
+    borderSize       = 1,
+    borderColor      = { r = 0, g = 0, b = 0 },
     healthColorMode   = "class",
     healthCustomColor = { r = 1, g = 0, b = 0 },
     powerColorMode    = "default",
     powerCustomColor  = { r = 0, g = 0.5, b = 1 },
     showHealthBar         = true,
+    healthBarHeight       = 100,
     showPowerBar          = true,
+    powerBarHeight        = 100,
     healthTextMode        = "OFF",
     powerTextMode         = "OFF",
     showCastBar           = false,
@@ -23,15 +31,20 @@ local PRD_DEFAULTS = {
     castBarVisibility     = "casting",
     castBarHeight         = 100,
     showClassResources    = true,
+    showResourceRechargeTimer = true,
     resourceStyle         = "blizzard",
     classResourcePosition = "bottom",
     resourceIconSize      = 100,
     resourceIconSpacing   = 2,
+    resourceBorders       = false,
     resourceColorMode     = "default",
     resourceCustomColor   = { r = 1, g = 1, b = 1 },
+    resourceChargedColor  = { r = 0.2, g = 0.8, b = 1.0 },
 }
 
 ns.settingsCategory = nil
+ns.settingsSubcategories = nil
+ns.pendingSettingsGroup = nil
 
 ---------------------------------------------------------------------------
 -- Helper: shallow-copy a value (copies one-level tables)
@@ -87,6 +100,12 @@ function ns:InitDB()
     -- Migrate old decimal scale (0.5-3.0) to new integer scale (1-200)
     if LegacyPRDDB.scale and LegacyPRDDB.scale < 10 then
         LegacyPRDDB.scale = math.floor(LegacyPRDDB.scale * 100 + 0.5)
+    end
+
+    -- Border visibility is now controlled by border texture ("None" = off).
+    -- Migrate old "size 0" profiles to hidden border state.
+    if tonumber(LegacyPRDDB.borderSize) and LegacyPRDDB.borderSize <= 0 then
+        LegacyPRDDB.borderTexture = "None"
     end
 end
 
@@ -332,13 +351,16 @@ function LegacyPRD_ApplySettings()
 
     local widthPct  = (db.width  or 100) / 100
     local heightPct = (db.height or 100) / 100
+    local healthHPct = (db.healthBarHeight or 100) / 100
+    local powerHPct  = (db.powerBarHeight  or 100) / 100
 
     local w    = widthPct * 140
-    local hh   = heightPct * 10
-    local ph   = math.floor(hh * 0.8)
+    local baseH = heightPct * 10
+    local hh   = math.max(math.floor(baseH * healthHPct + 0.5), 4)
+    local ph   = math.max(math.floor(baseH * 0.8 * powerHPct + 0.5), 4)
     local cbHPct = (db.castBarHeight or 100) / 100
-    local cbH  = math.max(math.floor(hh * 0.6 * cbHPct + 0.5), 4)
-    local rbH  = math.max(math.floor(hh * 0.5 + 0.5), 4)
+    local cbH  = math.max(math.floor(baseH * 0.6 * cbHPct + 0.5), 4)
+    local rbH  = math.max(math.floor(baseH * 0.5 + 0.5), 4)
 
     -- Store dimensions for UpdateLayout
     ns.barWidth = w
@@ -366,9 +388,19 @@ function LegacyPRD_ApplySettings()
     -- Lock state
     ApplyLockState()
 
+    -- SharedMedia textures/borders
+    if LegacyPRD_ApplyVisuals then
+        LegacyPRD_ApplyVisuals()
+    end
+
     -- Colors
     LegacyPRD_UpdateHealthColor()
     LegacyPRD_UpdatePowerColor()
+
+    -- Fade alpha
+    if LegacyPRD_ApplyFrameAlpha then
+        LegacyPRD_ApplyFrameAlpha()
+    end
 
     -- Rebuild layout
     LegacyPRD_UpdateLayout()
@@ -423,6 +455,7 @@ local function MakeCheck(parent, name, label)
     lbl:SetText(label)
 
     box.check = cb
+    box.lbl   = lbl
     return box
 end
 
@@ -496,7 +529,49 @@ local function MakeColorPicker(parent, label, getColor, setColor, onConfirm)
     end)
 
     box.swatch = swatch
+    box.button = btn
+    box.label  = label
     return box
+end
+
+local function GetSharedMedia()
+    if type(LegacyPRD_GetSharedMediaLib) == "function" then
+        return LegacyPRD_GetSharedMediaLib()
+    end
+    if type(LibStub) ~= "function" then return nil end
+    local ok, lib = pcall(LibStub, "LibSharedMedia-3.0", true)
+    if ok then return lib end
+    return nil
+end
+
+local function BuildMediaOptions(mediaType, fallback)
+    local opts = {}
+    local seen = {}
+
+    for _, o in ipairs(fallback) do
+        opts[#opts + 1] = { text = o.text, value = o.value }
+        seen[o.value] = true
+    end
+
+    local lsm = GetSharedMedia()
+    if lsm and lsm.List then
+        local list = lsm:List(mediaType)
+        if type(list) == "table" then
+            local names = {}
+            for _, name in ipairs(list) do
+                names[#names + 1] = name
+            end
+            table.sort(names)
+            for _, name in ipairs(names) do
+                if not seen[name] then
+                    opts[#opts + 1] = { text = name, value = name }
+                    seen[name] = true
+                end
+            end
+        end
+    end
+
+    return opts
 end
 
 ---------------------------------------------------------------------------
@@ -515,29 +590,116 @@ function ns:CreateSettingsPanel()
     content:SetHeight(1200)
     scrollFrame:SetScrollChild(content)
 
+    local function AttachSettingsContent(parent)
+        scrollFrame:SetParent(parent)
+        scrollFrame:ClearAllPoints()
+        scrollFrame:SetPoint("TOPLEFT", 0, 0)
+        scrollFrame:SetPoint("BOTTOMRIGHT", -24, 0)
+        scrollFrame:Show()
+    end
+
     --------------- layout engine ---------------
     local items = {}
     local refreshing = false
+    local activeGroup = "general"
+    local searchQuery = ""
+    local currentGroup = "general"
+    local LayoutAll
+
+    local function IsValidGroup(group)
+        return group == "general" or group == "health" or group == "power" or group == "style" or group == "resources" or group == "cast"
+    end
+
+    local function NormalizeSearchText(text)
+        if type(text) ~= "string" then return "" end
+        text = text:gsub("|c%x%x%x%x%x%x%x%x", "")
+        text = text:gsub("|r", "")
+        text = strtrim(text)
+        if text == "" then return "" end
+        return string.lower(text)
+    end
+
+    local function DeriveSearchText(frame, opts)
+        if opts and opts.search then
+            return NormalizeSearchText(opts.search)
+        end
+
+        local text
+        if frame.lbl and frame.lbl.GetText then
+            text = frame.lbl:GetText()
+        elseif frame.text and frame.text.GetText then
+            text = frame.text:GetText()
+        elseif frame.label then
+            text = frame.label
+        end
+        return NormalizeSearchText(text)
+    end
 
     local function Add(frame, height, opts)
         items[#items + 1] = {
-            frame   = frame,
-            height  = height,
-            indent  = opts and opts.indent or 0,
-            isHead  = opts and opts.isHead or false,
-            visFn   = opts and opts.visFn  or nil,
+            frame      = frame,
+            height     = height,
+            indent     = opts and opts.indent or 0,
+            isHead     = opts and opts.isHead or false,
+            visFn      = opts and opts.visFn or nil,
+            sticky     = opts and opts.sticky or false,
+            group      = (opts and opts.group) or currentGroup,
+            searchText = DeriveSearchText(frame, opts),
         }
     end
 
-    local function LayoutAll()
-        local cw = canvas:GetWidth()
+    local function ComputeVisibility()
+        local vis = {}
+
+        for i, it in ipairs(items) do
+            local shown = true
+            if it.visFn then shown = it.visFn() end
+
+            if shown and not it.sticky then
+                if it.group ~= activeGroup then
+                    shown = false
+                end
+                if shown and searchQuery ~= "" then
+                    local txt = it.searchText or ""
+                    shown = (txt ~= "" and txt:find(searchQuery, 1, true) ~= nil)
+                end
+            end
+
+            vis[i] = shown
+        end
+
+        for i, it in ipairs(items) do
+            if it.isHead and not it.sticky then
+                local hasVisibleChild = false
+                for j = i + 1, #items do
+                    if items[j].isHead then break end
+                    if vis[j] then
+                        hasVisibleChild = true
+                        break
+                    end
+                end
+
+                local headerMatch = false
+                if searchQuery ~= "" then
+                    local txt = it.searchText or ""
+                    headerMatch = (txt ~= "" and txt:find(searchQuery, 1, true) ~= nil)
+                end
+                vis[i] = hasVisibleChild or headerMatch
+            end
+        end
+
+        return vis
+    end
+
+    LayoutAll = function()
+        local host = scrollFrame:GetParent() or canvas
+        local cw = host:GetWidth()
         if cw and cw > 50 then content:SetWidth(cw - 30) end
 
+        local visMap = ComputeVisibility()
         local y = -16
-        for _, it in ipairs(items) do
-            local vis = true
-            if it.visFn then vis = it.visFn() end
-            if vis then
+        for i, it in ipairs(items) do
+            if visMap[i] then
                 it.frame:Show()
                 it.frame:ClearAllPoints()
                 if it.isHead then y = y - 12 end
@@ -558,7 +720,7 @@ function ns:CreateSettingsPanel()
     local titleFS = titleBox:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
     titleFS:SetPoint("TOPLEFT", 0, 0)
     titleFS:SetText("LegacyPRD - Personal Resource Display")
-    Add(titleBox, 20)
+    Add(titleBox, 20, { sticky = true, group = "all", search = "legacy personal resource display" })
 
     -- Subtitle
     local subBox = CreateFrame("Frame", nil, content)
@@ -566,7 +728,7 @@ function ns:CreateSettingsPanel()
     local subFS = subBox:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     subFS:SetPoint("TOPLEFT", 0, 0)
     subFS:SetText("Restore the Legacy Personal Resource Display anchored to your character.")
-    Add(subBox, 14)
+    Add(subBox, 14, { sticky = true, group = "all" })
 
     -- Reset button
     local resetBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
@@ -576,11 +738,12 @@ function ns:CreateSettingsPanel()
     resetMsg:SetPoint("LEFT", resetBtn, "RIGHT", 8, 0)
     resetMsg:SetText("Settings reset!")
     resetMsg:Hide()
-    Add(resetBtn, 24)
+    Add(resetBtn, 24, { sticky = true, group = "all", search = "reset defaults settings" })
 
     ---------------------------------------------------------------
     -- Position & Size
     ---------------------------------------------------------------
+    currentGroup = "general"
     Add(MakeHeader(content, "Position & Size"), 16, {isHead = true})
 
     local lockW = MakeCheck(content, "Lock", "Lock Frame Position")
@@ -617,9 +780,37 @@ function ns:CreateSettingsPanel()
     Add(heightW, 36)
 
     ---------------------------------------------------------------
-    -- Visibility
+    -- General Visibility
     ---------------------------------------------------------------
     Add(MakeHeader(content, "Visibility"), 16, {isHead = true})
+
+    local combatAlphaW = MakeSlider(content, "CombatAlpha", "In Combat Alpha (%)", 0, 100, 1)
+    combatAlphaW.slider:SetScript("OnValueChanged", function(_, v)
+        v = math.floor(v + 0.5); combatAlphaW.val:SetText(v .. "%")
+        if refreshing then return end
+        if LegacyPRDDB then
+            LegacyPRDDB.alphaInCombat = v
+            if LegacyPRD_ApplyFrameAlpha then LegacyPRD_ApplyFrameAlpha() end
+        end
+    end)
+    Add(combatAlphaW, 36)
+
+    local oocAlphaW = MakeSlider(content, "OOCAlpha", "Out of Combat Alpha (%)", 0, 100, 1)
+    oocAlphaW.slider:SetScript("OnValueChanged", function(_, v)
+        v = math.floor(v + 0.5); oocAlphaW.val:SetText(v .. "%")
+        if refreshing then return end
+        if LegacyPRDDB then
+            LegacyPRDDB.alphaOutOfCombat = v
+            if LegacyPRD_ApplyFrameAlpha then LegacyPRD_ApplyFrameAlpha() end
+        end
+    end)
+    Add(oocAlphaW, 36)
+
+    ---------------------------------------------------------------
+    -- Health Bar
+    ---------------------------------------------------------------
+    currentGroup = "health"
+    Add(MakeHeader(content, "Health Bar"), 16, {isHead = true})
 
     local showHealthW = MakeCheck(content, "ShowHP", "Show Health Bar")
     showHealthW.check:SetScript("OnClick", function(self)
@@ -627,16 +818,13 @@ function ns:CreateSettingsPanel()
     end)
     Add(showHealthW, 24)
 
-    local showPowerW = MakeCheck(content, "ShowPow", "Show Power Bar")
-    showPowerW.check:SetScript("OnClick", function(self)
-        if LegacyPRDDB then LegacyPRDDB.showPowerBar = self:GetChecked(); LegacyPRD_ApplySettings() end
+    local healthHtW = MakeSlider(content, "HealthBarHeight", "Health Bar Height (%)", 50, 300, 1)
+    healthHtW.slider:SetScript("OnValueChanged", function(_, v)
+        v = math.floor(v + 0.5); healthHtW.val:SetText(v .. "%")
+        if refreshing then return end
+        if LegacyPRDDB then LegacyPRDDB.healthBarHeight = v; LegacyPRD_ApplySettings() end
     end)
-    Add(showPowerW, 24)
-
-    ---------------------------------------------------------------
-    -- Status Text
-    ---------------------------------------------------------------
-    Add(MakeHeader(content, "Status Text"), 16, {isHead = true})
+    Add(healthHtW, 36, {indent = 16})
 
     local TEXT_MODE_OPTS = {
         { text = "Off",           value = "OFF" },
@@ -658,31 +846,8 @@ function ns:CreateSettingsPanel()
             UIDropDownMenu_AddButton(info)
         end
     end)
-    Add(healthTextW, 44)
+    Add(healthTextW, 44, {indent = 16})
 
-    local powerTextW = MakeDropdown(content, "PowerTextMode", "Power Text")
-    UIDropDownMenu_Initialize(powerTextW.dropdown, function()
-        for _, o in ipairs(TEXT_MODE_OPTS) do
-            local info = UIDropDownMenu_CreateInfo()
-            info.text = o.text; info.value = o.value
-            info.checked = (LegacyPRDDB and (LegacyPRDDB.powerTextMode or "OFF") == o.value)
-            info.func = function(btn)
-                LegacyPRDDB.powerTextMode = btn.value
-                UIDropDownMenu_SetText(powerTextW.dropdown, btn:GetText())
-                CloseDropDownMenus()
-                if LegacyPRD_UpdateStatusText then LegacyPRD_UpdateStatusText() end
-            end
-            UIDropDownMenu_AddButton(info)
-        end
-    end)
-    Add(powerTextW, 44)
-
-    ---------------------------------------------------------------
-    -- Colors
-    ---------------------------------------------------------------
-    Add(MakeHeader(content, "Colors"), 16, {isHead = true})
-
-    -- Health color dropdown
     local HEALTH_OPTS = {
         { text = "Class Color",  value = "class" },
         { text = "Green",        value = "green" },
@@ -704,18 +869,54 @@ function ns:CreateSettingsPanel()
             UIDropDownMenu_AddButton(info)
         end
     end)
-    Add(healthDDW, 44)
+    Add(healthDDW, 44, {indent = 16})
 
     -- Health custom picker
     local healthPicker = MakeColorPicker(content, "Custom Health Color",
         function() return LegacyPRDDB and LegacyPRDDB.healthCustomColor or {r=1,g=0,b=0} end,
         function(r,g,b) if LegacyPRDDB then LegacyPRDDB.healthCustomColor = {r=r,g=g,b=b} end end,
         function() LegacyPRD_UpdateHealthColor() end)
-    Add(healthPicker, 26, {indent = 16, visFn = function()
+    Add(healthPicker, 26, {indent = 32, visFn = function()
         return LegacyPRDDB and LegacyPRDDB.healthColorMode == "custom"
     end})
 
-    -- Power color dropdown
+    ---------------------------------------------------------------
+    -- Power Bar
+    ---------------------------------------------------------------
+    currentGroup = "power"
+    Add(MakeHeader(content, "Power Bar"), 16, {isHead = true})
+
+    local showPowerW = MakeCheck(content, "ShowPow", "Show Power Bar")
+    showPowerW.check:SetScript("OnClick", function(self)
+        if LegacyPRDDB then LegacyPRDDB.showPowerBar = self:GetChecked(); LegacyPRD_ApplySettings() end
+    end)
+    Add(showPowerW, 24)
+
+    local powerHtW = MakeSlider(content, "PowerBarHeight", "Power Bar Height (%)", 50, 300, 1)
+    powerHtW.slider:SetScript("OnValueChanged", function(_, v)
+        v = math.floor(v + 0.5); powerHtW.val:SetText(v .. "%")
+        if refreshing then return end
+        if LegacyPRDDB then LegacyPRDDB.powerBarHeight = v; LegacyPRD_ApplySettings() end
+    end)
+    Add(powerHtW, 36, {indent = 16})
+
+    local powerTextW = MakeDropdown(content, "PowerTextMode", "Power Text")
+    UIDropDownMenu_Initialize(powerTextW.dropdown, function()
+        for _, o in ipairs(TEXT_MODE_OPTS) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text = o.text; info.value = o.value
+            info.checked = (LegacyPRDDB and (LegacyPRDDB.powerTextMode or "OFF") == o.value)
+            info.func = function(btn)
+                LegacyPRDDB.powerTextMode = btn.value
+                UIDropDownMenu_SetText(powerTextW.dropdown, btn:GetText())
+                CloseDropDownMenus()
+                if LegacyPRD_UpdateStatusText then LegacyPRD_UpdateStatusText() end
+            end
+            UIDropDownMenu_AddButton(info)
+        end
+    end)
+    Add(powerTextW, 44, {indent = 16})
+
     local POWER_OPTS = {
         { text = "Default",      value = "default" },
         { text = "Custom Color", value = "custom" },
@@ -736,21 +937,107 @@ function ns:CreateSettingsPanel()
             UIDropDownMenu_AddButton(info)
         end
     end)
-    Add(powerDDW, 44)
+    Add(powerDDW, 44, {indent = 16})
 
     -- Power custom picker
     local powerPicker = MakeColorPicker(content, "Custom Power Color",
         function() return LegacyPRDDB and LegacyPRDDB.powerCustomColor or {r=0,g=0.5,b=1} end,
         function(r,g,b) if LegacyPRDDB then LegacyPRDDB.powerCustomColor = {r=r,g=g,b=b} end end,
         function() LegacyPRD_UpdatePowerColor() end)
-    Add(powerPicker, 26, {indent = 16, visFn = function()
+    Add(powerPicker, 26, {indent = 32, visFn = function()
         return LegacyPRDDB and LegacyPRDDB.powerColorMode == "custom"
+    end})
+
+    ---------------------------------------------------------------
+    -- Style
+    ---------------------------------------------------------------
+    currentGroup = "style"
+    Add(MakeHeader(content, "Style"), 16, {isHead = true})
+
+    local BAR_TEXTURE_FALLBACK = {
+        { text = "Blizzard", value = "Blizzard" },
+        { text = "Solid",    value = "Solid" },
+    }
+    local BORDER_TEXTURE_FALLBACK = {
+        { text = "Solid", value = "Solid" },
+        { text = "None",  value = "None" },
+    }
+
+    local barTexW = MakeDropdown(content, "BarTexture", "Bar Texture")
+    UIDropDownMenu_Initialize(barTexW.dropdown, function()
+        local opts = BuildMediaOptions("statusbar", BAR_TEXTURE_FALLBACK)
+        for _, o in ipairs(opts) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text = o.text; info.value = o.value
+            info.checked = (LegacyPRDDB and (LegacyPRDDB.barTexture or "Blizzard") == o.value)
+            info.func = function(btn)
+                LegacyPRDDB.barTexture = btn.value
+                UIDropDownMenu_SetText(barTexW.dropdown, btn:GetText())
+                CloseDropDownMenus()
+                LegacyPRD_ApplySettings()
+                if LegacyPRD_UpdateClassResources then LegacyPRD_UpdateClassResources() end
+            end
+            UIDropDownMenu_AddButton(info)
+        end
+    end)
+    Add(barTexW, 44)
+
+    local borderTexW = MakeDropdown(content, "BorderTexture", "Border Texture")
+    UIDropDownMenu_Initialize(borderTexW.dropdown, function()
+        local opts = BuildMediaOptions("border", BORDER_TEXTURE_FALLBACK)
+        for _, o in ipairs(opts) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text = o.text; info.value = o.value
+            info.checked = (LegacyPRDDB and (LegacyPRDDB.borderTexture or "Solid") == o.value)
+            info.func = function(btn)
+                LegacyPRDDB.borderTexture = btn.value
+                UIDropDownMenu_SetText(borderTexW.dropdown, btn:GetText())
+                CloseDropDownMenus()
+                LegacyPRD_ApplySettings()
+                if LegacyPRD_UpdateClassResources then LegacyPRD_UpdateClassResources() end
+            end
+            UIDropDownMenu_AddButton(info)
+        end
+    end)
+    Add(borderTexW, 44, {indent = 16, visFn = function()
+        return LegacyPRDDB and (LegacyPRDDB.borderTexture or "Solid") ~= "None"
+    end})
+
+    local showBorderW = MakeCheck(content, "ShowBorder", "Show Frame Border")
+    showBorderW.check:SetScript("OnClick", function(self)
+        if not LegacyPRDDB then return end
+        if self:GetChecked() then
+            if (LegacyPRDDB.borderTexture or "Solid") == "None" then
+                LegacyPRDDB.borderTexture = "Solid"
+            end
+            if not LegacyPRDDB.borderSize or LegacyPRDDB.borderSize <= 0 then
+                LegacyPRDDB.borderSize = 1
+            end
+        else
+            LegacyPRDDB.borderTexture = "None"
+        end
+        LegacyPRD_ApplySettings()
+        if LegacyPRD_UpdateClassResources then LegacyPRD_UpdateClassResources() end
+        LayoutAll()
+    end)
+    Add(showBorderW, 24)
+
+    local borderColorPicker = MakeColorPicker(content, "Border Color",
+        function() return LegacyPRDDB and LegacyPRDDB.borderColor or {r=0,g=0,b=0} end,
+        function(r,g,b) if LegacyPRDDB then LegacyPRDDB.borderColor = {r=r,g=g,b=b} end end,
+        function()
+            LegacyPRD_ApplySettings()
+            if LegacyPRD_UpdateClassResources then LegacyPRD_UpdateClassResources() end
+        end)
+    Add(borderColorPicker, 26, {indent = 16, visFn = function()
+        return LegacyPRDDB and (LegacyPRDDB.borderTexture or "Solid") ~= "None"
     end})
 
     ---------------------------------------------------------------
     -- Class Resources
     ---------------------------------------------------------------
-    Add(MakeHeader(content, "Class Resources"), 16, {isHead = true})
+    currentGroup = "resources"
+    Add(MakeHeader(content, "Personal Resources"), 16, {isHead = true})
 
     local classResW = MakeCheck(content, "ClassRes", "Show Class Resources")
     classResW.check:SetScript("OnClick", function(self)
@@ -761,6 +1048,20 @@ function ns:CreateSettingsPanel()
         end
     end)
     Add(classResW, 24)
+
+    local rechargeTimerW = MakeCheck(content, "RechargeTimer", "Show Rune Recharge Timer")
+    rechargeTimerW.check:SetScript("OnClick", function(self)
+        if LegacyPRDDB then
+            LegacyPRDDB.showResourceRechargeTimer = self:GetChecked()
+            if LegacyPRD_UpdateClassResources then LegacyPRD_UpdateClassResources() end
+            LayoutAll()
+        end
+    end)
+    Add(rechargeTimerW, 24, {indent = 16, visFn = function()
+        if not LegacyPRDDB or not LegacyPRDDB.showClassResources then return false end
+        local _, cls = UnitClass("player")
+        return cls == "DEATHKNIGHT"
+    end})
 
     -- Resource Style dropdown
     local RES_STYLE_OPTS = {
@@ -813,6 +1114,19 @@ function ns:CreateSettingsPanel()
         return LegacyPRDDB and LegacyPRDDB.showClassResources
     end})
 
+    local resBorderW = MakeCheck(content, "ResBorders", "Show Resource Borders")
+    resBorderW.check:SetScript("OnClick", function(self)
+        if LegacyPRDDB then
+            LegacyPRDDB.resourceBorders = self:GetChecked()
+            LegacyPRD_ApplySettings()
+            if LegacyPRD_UpdateClassResources then LegacyPRD_UpdateClassResources() end
+            LayoutAll()
+        end
+    end)
+    Add(resBorderW, 24, {indent = 16, visFn = function()
+        return LegacyPRDDB and LegacyPRDDB.showClassResources
+    end})
+
     -- Resource Color dropdown
     local RES_COLOR_OPTS = {
         { text = "Class Default", value = "default" },
@@ -855,6 +1169,18 @@ function ns:CreateSettingsPanel()
         return LegacyPRDDB.resourceColorMode == "custom"
     end})
 
+    local chargedColorPicker = MakeColorPicker(content, "Charged Point Color",
+        function() return LegacyPRDDB and LegacyPRDDB.resourceChargedColor or {r=0.2,g=0.8,b=1} end,
+        function(r,g,b) if LegacyPRDDB then LegacyPRDDB.resourceChargedColor = {r=r,g=g,b=b} end end,
+        function()
+            if LegacyPRD_UpdateClassResources then LegacyPRD_UpdateClassResources() end
+        end)
+    Add(chargedColorPicker, 26, {indent = 32, visFn = function()
+        if not LegacyPRDDB or not LegacyPRDDB.showClassResources then return false end
+        local _, cls = UnitClass("player")
+        return cls == "ROGUE" or cls == "DRUID"
+    end})
+
     -- Icon Size slider
     local iconSizeW = MakeSlider(content, "IconSize", "Resource Icon Size (%)", 50, 200, 1)
     iconSizeW.slider:SetScript("OnValueChanged", function(_, v)
@@ -882,6 +1208,7 @@ function ns:CreateSettingsPanel()
     ---------------------------------------------------------------
     -- Cast Bar
     ---------------------------------------------------------------
+    currentGroup = "cast"
     Add(MakeHeader(content, "Cast Bar"), 16, {isHead = true})
 
     local showCastW = MakeCheck(content, "ShowCast", "Show Cast Bar")
@@ -957,22 +1284,40 @@ function ns:CreateSettingsPanel()
     -- Refresh all controls
     ---------------------------------------------------------------
     local function SetDropdownText(dd, opts, val)
-        for _, o in ipairs(opts) do
-            if o.value == val then UIDropDownMenu_SetText(dd, o.text); return end
+        if opts then
+            for _, o in ipairs(opts) do
+                if o.value == val then
+                    UIDropDownMenu_SetText(dd, o.text)
+                    return
+                end
+            end
         end
+        UIDropDownMenu_SetText(dd, tostring(val or ""))
     end
 
     local function RefreshPanel()
         if not LegacyPRDDB then return end
         refreshing = true
+        local requestedGroup = ns.pendingSettingsGroup
+        if requestedGroup and IsValidGroup(requestedGroup) then
+            activeGroup = requestedGroup
+        else
+            activeGroup = "general"
+        end
+        ns.pendingSettingsGroup = nil
+        searchQuery = ""
 
         lockW.check:SetChecked(LegacyPRDDB.locked)
         scaleW.slider:SetValue(LegacyPRDDB.scale  or 100)
         widthW.slider:SetValue(LegacyPRDDB.width  or 100)
         heightW.slider:SetValue(LegacyPRDDB.height or 100)
+        combatAlphaW.slider:SetValue(LegacyPRDDB.alphaInCombat or 100)
+        oocAlphaW.slider:SetValue(LegacyPRDDB.alphaOutOfCombat or 60)
 
         showHealthW.check:SetChecked(LegacyPRDDB.showHealthBar ~= false)
+        healthHtW.slider:SetValue(LegacyPRDDB.healthBarHeight or 100)
         showPowerW.check:SetChecked(LegacyPRDDB.showPowerBar ~= false)
+        powerHtW.slider:SetValue(LegacyPRDDB.powerBarHeight or 100)
 
         SetDropdownText(healthTextW.dropdown, TEXT_MODE_OPTS, LegacyPRDDB.healthTextMode or "OFF")
         SetDropdownText(powerTextW.dropdown, TEXT_MODE_OPTS, LegacyPRDDB.powerTextMode or "OFF")
@@ -988,9 +1333,19 @@ function ns:CreateSettingsPanel()
             powerPicker.swatch:SetColorTexture(pc.r, pc.g, pc.b)
         end
 
+        SetDropdownText(barTexW.dropdown, BuildMediaOptions("statusbar", BAR_TEXTURE_FALLBACK), LegacyPRDDB.barTexture or "Blizzard")
+        SetDropdownText(borderTexW.dropdown, BuildMediaOptions("border", BORDER_TEXTURE_FALLBACK), LegacyPRDDB.borderTexture or "Solid")
+        showBorderW.check:SetChecked((LegacyPRDDB.borderTexture or "Solid") ~= "None")
+        if borderColorPicker.swatch then
+            local bc = LegacyPRDDB.borderColor or {r=0,g=0,b=0}
+            borderColorPicker.swatch:SetColorTexture(bc.r, bc.g, bc.b)
+        end
+
         classResW.check:SetChecked(LegacyPRDDB.showClassResources)
+        rechargeTimerW.check:SetChecked(LegacyPRDDB.showResourceRechargeTimer ~= false)
         SetDropdownText(resStyleW.dropdown, RES_STYLE_OPTS, LegacyPRDDB.resourceStyle or "blizzard")
         SetDropdownText(resPosW.dropdown, RES_POS_OPTS, LegacyPRDDB.classResourcePosition or "bottom")
+        resBorderW.check:SetChecked(LegacyPRDDB.resourceBorders == true)
         iconSizeW.slider:SetValue(LegacyPRDDB.resourceIconSize or 100)
         iconSpaceW.slider:SetValue(LegacyPRDDB.resourceIconSpacing or 2)
 
@@ -998,6 +1353,10 @@ function ns:CreateSettingsPanel()
         if resColorPicker.swatch then
             local rc = LegacyPRDDB.resourceCustomColor or {r=1,g=1,b=1}
             resColorPicker.swatch:SetColorTexture(rc.r, rc.g, rc.b)
+        end
+        if chargedColorPicker.swatch then
+            local cc = LegacyPRDDB.resourceChargedColor or {r=0.2,g=0.8,b=1}
+            chargedColorPicker.swatch:SetColorTexture(cc.r, cc.g, cc.b)
         end
 
         showCastW.check:SetChecked(LegacyPRDDB.showCastBar == true)
@@ -1034,7 +1393,63 @@ function ns:CreateSettingsPanel()
     Settings.RegisterAddOnCategory(category)
     ns.settingsCategory = category
 
-    canvas:SetScript("OnShow", RefreshPanel)
+    local function RegisterGroupSubcategory(name, group)
+        if not Settings.RegisterCanvasLayoutSubcategory then
+            return nil
+        end
+        local subCanvas = CreateFrame("Frame")
+        subCanvas:SetScript("OnShow", function()
+            ns.pendingSettingsGroup = group
+            AttachSettingsContent(subCanvas)
+            RefreshPanel()
+        end)
+
+        local sub = Settings.RegisterCanvasLayoutSubcategory(category, subCanvas, name)
+        Settings.RegisterAddOnCategory(sub)
+        return sub
+    end
+
+    ns.settingsSubcategories = {
+        health    = RegisterGroupSubcategory("Health Bar", "health"),
+        power     = RegisterGroupSubcategory("Power Bar", "power"),
+        style     = RegisterGroupSubcategory("Style", "style"),
+        resources = RegisterGroupSubcategory("Personal Resources", "resources"),
+        castbar   = RegisterGroupSubcategory("Cast Bar", "cast"),
+    }
+
+    canvas:SetScript("OnShow", function()
+        AttachSettingsContent(canvas)
+        RefreshPanel()
+    end)
+end
+
+function ns:OpenSettingsGroup(group)
+    if group ~= "general" and group ~= "health" and group ~= "power" and group ~= "style" and group ~= "resources" and group ~= "cast" then
+        group = "general"
+    end
+    ns.pendingSettingsGroup = group
+    local targetCategory = ns.settingsCategory
+    if group == "health" and ns.settingsSubcategories and ns.settingsSubcategories.health then
+        targetCategory = ns.settingsSubcategories.health
+    elseif group == "power" and ns.settingsSubcategories and ns.settingsSubcategories.power then
+        targetCategory = ns.settingsSubcategories.power
+    elseif group == "style" and ns.settingsSubcategories and ns.settingsSubcategories.style then
+        targetCategory = ns.settingsSubcategories.style
+    elseif group == "resources" and ns.settingsSubcategories and ns.settingsSubcategories.resources then
+        targetCategory = ns.settingsSubcategories.resources
+    elseif group == "cast" and ns.settingsSubcategories and ns.settingsSubcategories.castbar then
+        targetCategory = ns.settingsSubcategories.castbar
+    end
+
+    if targetCategory then
+        local id = targetCategory:GetID()
+        Settings.OpenToCategory(id)
+        C_Timer.After(0, function()
+            if targetCategory and targetCategory.GetID then
+                Settings.OpenToCategory(targetCategory:GetID())
+            end
+        end)
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -1042,9 +1457,42 @@ end
 ---------------------------------------------------------------------------
 function ns:HandleConfigCommand(args)
     if args == "" or args == "options" or args == "config" or args == "settings" then
-        if ns.settingsCategory then
-            Settings.OpenToCategory(ns.settingsCategory:GetID())
-        end
+        self:OpenSettingsGroup("general")
+        return
+    end
+
+    if args == "general" then
+        self:OpenSettingsGroup("general")
+        return
+    end
+
+    if args == "health" then
+        self:OpenSettingsGroup("health")
+        return
+    end
+
+    if args == "power" then
+        self:OpenSettingsGroup("power")
+        return
+    end
+
+    if args == "style" or args == "appearance" then
+        self:OpenSettingsGroup("style")
+        return
+    end
+
+    if args == "colors" or args == "colours" then
+        self:OpenSettingsGroup("health")
+        return
+    end
+
+    if args == "resources" then
+        self:OpenSettingsGroup("resources")
+        return
+    end
+
+    if args == "cast" or args == "castbar" then
+        self:OpenSettingsGroup("cast")
         return
     end
 
@@ -1084,6 +1532,12 @@ function ns:HandleConfigCommand(args)
     print("  /lprd - Open settings panel")
     print("  /lprd lock - Lock frame position")
     print("  /lprd unlock - Unlock frame position")
+    print("  /lprd general - Open General settings")
+    print("  /lprd health - Open Health Bar settings")
+    print("  /lprd power - Open Power Bar settings")
+    print("  /lprd style - Open Style settings")
+    print("  /lprd resources - Open Personal Resources settings")
+    print("  /lprd cast - Open Cast Bar settings")
     print("  /lprd scale <1-200> - Set scale percentage")
     print("  /lprd reset - Reset to defaults")
 end
